@@ -1,0 +1,174 @@
+import os
+import argparse
+import sys
+
+# -------------------------------
+# Check and import dependencies
+# -------------------------------
+try:
+    import cv2
+except ModuleNotFoundError:
+    print("❌ ERROR: OpenCV not installed. Run: pip install opencv-python")
+    sys.exit(1)
+
+try:
+    import numpy as np
+    from tensorflow.keras.models import Sequential, load_model
+    from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
+    from tensorflow.keras.preprocessing.image import ImageDataGenerator, img_to_array, load_img
+except ModuleNotFoundError:
+    print("❌ ERROR: TensorFlow/Keras not installed. Run: pip install tensorflow numpy")
+    sys.exit(1)
+
+# -------------------------------
+# Constants
+# -------------------------------
+IMAGE_SIZE = (128, 128)
+CLASSES = ["low", "medium", "high"]  # Make sure folders are named exactly
+
+# ------------------------------------------------------------
+# 1. BUILD MODEL
+# ------------------------------------------------------------
+def build_model():
+    model = Sequential([
+        Conv2D(32, (3, 3), activation="relu", input_shape=(128, 128, 3)),
+        MaxPooling2D(2, 2),
+
+        Conv2D(64, (3, 3), activation="relu"),
+        MaxPooling2D(2, 2),
+
+        Conv2D(128, (3, 3), activation="relu"),
+        MaxPooling2D(2, 2),
+
+        Flatten(),
+        Dense(128, activation="relu"),
+        Dropout(0.3),
+        Dense(len(CLASSES), activation="softmax"),
+    ])
+    model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
+    return model
+
+# ------------------------------------------------------------
+# 2. TRAINING FUNCTION
+# ------------------------------------------------------------
+def train_model(data_path, model_path):
+    if not os.path.exists(data_path):
+        print(f"❌ ERROR: Dataset path does not exist: {data_path}")
+        return
+
+    # Create data generator without validation split for small datasets
+    train_datagen = ImageDataGenerator(rescale=1.0 / 255)
+
+    # Load training data
+    train_gen = train_datagen.flow_from_directory(
+        data_path,
+        target_size=IMAGE_SIZE,
+        batch_size=2,  # Small batch size for few images
+        class_mode="categorical"
+    )
+
+    model = build_model()
+    print(f"📊 Training with {train_gen.samples} samples...")
+    print(f"📦 Batch size: 2 | Classes: {train_gen.class_indices}")
+    
+    # Train the model
+    model.fit(train_gen, epochs=10, verbose=1)
+
+    model.save(model_path)
+    print(f"✅ Model successfully saved to: {model_path}")
+
+# ------------------------------------------------------------
+# 3. PREDICT SINGLE IMAGE
+# ------------------------------------------------------------
+def predict_image(model, img_path):
+    if not os.path.exists(img_path):
+        print(f"❌ ERROR: Image path does not exist: {img_path}")
+        return None, None
+
+    img = load_img(img_path, target_size=IMAGE_SIZE)
+    img_arr = img_to_array(img) / 255.0
+    img_arr = np.expand_dims(img_arr, axis=0)
+
+    prediction = model.predict(img_arr)[0]
+    cls_idx = np.argmax(prediction)
+    return CLASSES[cls_idx], float(prediction[cls_idx])
+
+# ------------------------------------------------------------
+# 4. WEBCAM MODE
+# ------------------------------------------------------------
+def webcam_mode(model):
+    cam = cv2.VideoCapture(0)
+    if not cam.isOpened():
+        print("❌ ERROR: Cannot open webcam")
+        return
+
+    print("Press 'q' to quit webcam mode")
+
+    while True:
+        ret, frame = cam.read()
+        if not ret:
+            continue
+
+        resized = cv2.resize(frame, IMAGE_SIZE)
+        arr = np.expand_dims(resized / 255.0, axis=0)
+
+        preds = model.predict(arr)[0]
+        cls = CLASSES[np.argmax(preds)]
+        confidence = preds[np.argmax(preds)]
+
+        cv2.putText(frame, f"{cls.upper()} ({confidence:.2f})",
+                    (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                    (0, 255, 0), 2)
+
+        cv2.imshow("Flood Water Level Detection", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+    cam.release()
+    cv2.destroyAllWindows()
+
+# ------------------------------------------------------------
+# 5. ARGUMENT PARSER
+# ------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(description="Flood Water Level Detection")
+    parser.add_argument("--mode", type=str, required=True,
+                        choices=["train", "webcam", "predict"],
+                        help="Mode: train / webcam / predict")
+    parser.add_argument("--data-path", type=str, help="Path to dataset folder")
+    parser.add_argument("--model-path", type=str, default="flood_model.h5", help="Path to save/load model")
+    parser.add_argument("--image", type=str, help="Image path for prediction")
+
+    args = parser.parse_args()
+
+    # TRAINING
+    if args.mode == "train":
+        if not args.data_path:
+            print("❌ ERROR: --data-path required for training")
+            return
+        train_model(args.data_path, args.model_path)
+
+    # WEBCAM MODE
+    elif args.mode == "webcam":
+        if not os.path.exists(args.model_path):
+            print(f"❌ ERROR: Model not found: {args.model_path}")
+            return
+        model = load_model(args.model_path)
+        webcam_mode(model)
+
+    # IMAGE PREDICTION
+    elif args.mode == "predict":
+        if not args.image:
+            print("❌ ERROR: --image required for prediction")
+            return
+        if not os.path.exists(args.model_path):
+            print(f"❌ ERROR: Model not found: {args.model_path}")
+            return
+        model = load_model(args.model_path)
+        label, confidence = predict_image(model, args.image)
+        if label is not None:
+            print(f"Prediction: {label} ({confidence:.2f})")
+
+if __name__ == "__main__":
+    main()
